@@ -67,18 +67,33 @@ function ac() {
   return audio;
 }
 
-function pop(pitch) {
+// Pop = a quick bubbly "blip" plus a xylophone-like note for the bubble's color.
+function pop(note) {
   if (!soundOn) return;
   const a = ac(), t = a.currentTime;
+
+  // the blip
   const osc = a.createOscillator();
   const gain = a.createGain();
   osc.type = 'sine';
-  osc.frequency.setValueAtTime(pitch, t);
-  osc.frequency.exponentialRampToValueAtTime(pitch * 2.5, t + 0.08);
-  gain.gain.setValueAtTime(0.35, t);
-  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+  osc.frequency.setValueAtTime(note, t);
+  osc.frequency.exponentialRampToValueAtTime(note * 2.5, t + 0.06);
+  gain.gain.setValueAtTime(0.2, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
   osc.connect(gain).connect(master);
-  osc.start(t); osc.stop(t + 0.16);
+  osc.start(t); osc.stop(t + 0.11);
+
+  // the musical note: fundamental + a bright overtone, ringing out
+  for (const [mult, vol, len] of [[1, 0.35, 0.9], [4, 0.08, 0.25]]) {
+    const o = a.createOscillator(), g = a.createGain();
+    o.type = mult === 1 ? 'triangle' : 'sine';
+    o.frequency.value = note * mult;
+    g.gain.setValueAtTime(0.0001, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.03);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.03 + len);
+    o.connect(g).connect(master);
+    o.start(t + 0.02); o.stop(t + 0.05 + len);
+  }
 }
 
 // Ramp an AudioParam through [[time, value], ...] (times relative to t0).
@@ -222,7 +237,16 @@ soundBtn.addEventListener('pointerdown', e => {
 });
 
 // ---------- Bubbles ----------
-const COLORS = [ [255,120,170], [120,200,255], [140,230,140], [255,210,90], [190,140,255], [255,160,100] ];
+// Each color always plays the same note (C major pentatonic, rainbow order low -> high),
+// so any sequence of pops sounds like a little tune.
+const COLORS = [
+  { rgb: [255,120,170], note: 523.25 },  // pink   - C
+  { rgb: [255,160,100], note: 587.33 },  // orange - D
+  { rgb: [255,210,90],  note: 659.25 },  // yellow - E
+  { rgb: [140,230,140], note: 783.99 },  // green  - G
+  { rgb: [120,200,255], note: 880.00 },  // blue   - A
+  { rgb: [190,140,255], note: 1046.50 }, // purple - high C
+];
 const ANIMALS = [
   { emoji: '🐶', name: 'dog' },
   { emoji: '🐱', name: 'cat' },
@@ -239,9 +263,11 @@ const ANIMALS = [
 ];
 const ANIMAL_CHANCE = 0.4;   // share of bubbles that carry an animal
 
-// Optional real recordings: put sounds/<name>.mp3 next to this file (e.g. sounds/cow.mp3)
-// and it is used instead of the synthesized sound for that animal.
-for (const a of ANIMALS) {
+// Optional real recordings: put sounds/<name>.mp3 next to this file (e.g. sounds/cow.mp3),
+// add the animal's name here, and it is used instead of the synthesized sound.
+// e.g. const RECORDINGS = ['cow', 'dog'];
+const RECORDINGS = [];
+for (const a of ANIMALS.filter(a => RECORDINGS.includes(a.name))) {
   const clip = new Audio(`sounds/${a.name}.mp3`);
   clip.preload = 'auto';
   clip.addEventListener('canplaythrough', () => { a.clip = clip; }, { once: true });
@@ -275,7 +301,7 @@ function makeBubble(fromEdge) {
     vx: rand(-40, 40),
     vy: fromEdge ? rand(-90, -50) : rand(-40, 40),
     wobble: rand(0, Math.PI * 2),
-    color: COLORS[Math.floor(Math.random() * COLORS.length)],
+    ...(c => ({ color: c.rgb, note: c.note }))(COLORS[Math.floor(Math.random() * COLORS.length)]),
     animal: Math.random() < ANIMAL_CHANCE ? ANIMALS[Math.floor(Math.random() * ANIMALS.length)] : null,
     scale: fromEdge ? 1 : 0,          // grows in when spawned in place
   };
@@ -294,7 +320,7 @@ function update(dt) {
     b.x += b.vx * dt;
     b.y += b.vy * dt;
     b.wobble += dt * 3;
-    b.scale = Math.min(1, b.scale + dt * 3);
+    b.scale = Math.min(1, Math.max(0, b.scale + dt * 3));
 
     // bounce softly off the walls (allow entering from the bottom)
     if (b.x < b.r)     { b.x = b.r;     b.vx = Math.abs(b.vx); }
@@ -408,7 +434,7 @@ canvas.addEventListener('pointerdown', e => {
     if (Math.hypot(x - b.x, y - b.y) <= b.r * 1.15) {
       bubbles.splice(i, 1);
       burst(b);
-      pop(rand(300, 600) * (60 / b.r + 0.5));
+      pop(b.note);
       if (b.animal) {
         const a = b.animal;
         setTimeout(() => animalSound(a), 150);   // let the pop be heard first
@@ -425,7 +451,9 @@ canvas.addEventListener('pointerdown', e => {
 // ---------- Loop ----------
 let last = performance.now();
 function loop(now) {
-  const dt = Math.min(0.05, (now - last) / 1000);
+  // rAF's first timestamp can be slightly earlier than performance.now() at startup,
+  // so clamp to avoid a negative step (which made bubble radii negative)
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000));
   last = now;
   update(dt);
   draw();

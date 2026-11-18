@@ -9,6 +9,7 @@
     margin: 0; height: 100%; overflow: hidden;
     background: linear-gradient(#7fd3ff, #c9f0ff 60%, #e9fbff);
     touch-action: none; user-select: none; -webkit-user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
     font-family: "Comic Sans MS", "Chalkboard SE", "Trebuchet MS", sans-serif;
   }
   canvas { display: block; width: 100%; height: 100%; cursor: pointer; }
@@ -37,6 +38,9 @@ const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 const scoreEl = document.getElementById('score');
 const soundBtn = document.getElementById('sound');
+
+// No right-click / long-press menu (little fingers hold the screen a lot)
+document.addEventListener('contextmenu', e => e.preventDefault());
 
 let W, H, dpr;
 function resize() {

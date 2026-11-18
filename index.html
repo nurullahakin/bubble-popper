@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Bubble Popper</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: linear-gradient(#7fd3ff, #c9f0ff 60%, #e9fbff);
+    touch-action: none; user-select: none; -webkit-user-select: none;
+    font-family: "Comic Sans MS", "Chalkboard SE", "Trebuchet MS", sans-serif;
+  }
+  canvas { display: block; width: 100%; height: 100%; cursor: pointer; }
+  #score {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    background: rgba(255,255,255,.8); color: #ff6fa8;
+    padding: 8px 26px; border-radius: 40px;
+    font-size: 40px; font-weight: bold;
+    box-shadow: 0 4px 0 rgba(0,0,0,.08);
+    pointer-events: none;
+  }
+  #sound {
+    position: fixed; top: 14px; right: 14px;
+    width: 60px; height: 60px; border: none; border-radius: 50%;
+    background: rgba(255,255,255,.8); font-size: 30px; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="score">⭐ 0</div>
+<button id="sound" aria-label="Toggle sound">🔊</button>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const soundBtn = document.getElementById('sound');
+
+let W, H, dpr;
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---------- Sound ----------
+let audio = null, master = null, noiseBuf = null, soundOn = true;
+function ac() {
+  if (!audio) {
+    audio = new (window.AudioContext || window.webkitAudioContext)();
+    master = audio.createDynamicsCompressor();
+    master.connect(audio.destination);
+    noiseBuf = audio.createBuffer(1, audio.sampleRate * 2, audio.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  if (audio.state === 'suspended') audio.resume();
+  return audio;
+}
+
+function pop(pitch) {
+  if (!soundOn) return;
+  const a = ac(), t = a.currentTime;
+  const osc = a.createOscillator();
+  const gain = a.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(pitch, t);
+  osc.frequency.exponentialRampToValueAtTime(pitch * 2.5, t + 0.08);
+  gain.gain.setValueAtTime(0.35, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+  osc.connect(gain).connect(master);
+  osc.start(t); osc.stop(t + 0.16);
+}
+
+// Ramp an AudioParam through [[time, value], ...] (times relative to t0).
+function ramp(param, pts, t0) {
+  if (typeof pts === 'number') { param.setValueAtTime(pts, t0); return; }
+  param.setValueAtTime(pts[0][1], t0 + pts[0][0]);
+  for (let i = 1; i < pts.length; i++) param.linearRampToValueAtTime(pts[i][1], t0 + pts[i][0]);
+}
+
+// One synthesized voice: oscillator or noise -> filters -> envelope -> tremolo -> out.
+//   wave/freq: source pitch curve   amp: loudness curve   filters: [{type, f, Q}]
+//   vib: {rate, depth} pitch wobble  am: {rate, depth, wave} loudness wobble (growl/buzz)
+function voice(t0, o) {
+  const a = audio;
+  const end = t0 + o.amp[o.amp.length - 1][0] + 0.05;
+  let src;
+  if (o.noise) {
+    src = a.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+  } else {
+    src = a.createOscillator(); src.type = o.wave || 'sawtooth';
+    ramp(src.frequency, o.freq, t0);
+    if (o.vib) {
+      const l = a.createOscillator(), lg = a.createGain();
+      l.frequency.value = o.vib.rate; lg.gain.value = o.vib.depth;
+      l.connect(lg).connect(src.frequency); l.start(t0); l.stop(end);
+    }
+  }
+  let node = src;
+  for (const f of o.filters || []) {
+    const bq = a.createBiquadFilter();
+    bq.type = f.type; bq.Q.value = f.Q || 1;
+    ramp(bq.frequency, f.f, t0);
+    node.connect(bq); node = bq;
+  }
+  const env = a.createGain();
+  env.gain.value = 0;
+  ramp(env.gain, o.amp, t0);
+  node.connect(env); node = env;
+  if (o.am) {
+    const trem = a.createGain(), l = a.createOscillator(), lg = a.createGain();
+    trem.gain.value = 1 - o.am.depth / 2;
+    l.type = o.am.wave || 'sine'; l.frequency.value = o.am.rate; lg.gain.value = o.am.depth / 2;
+    l.connect(lg).connect(trem.gain); l.start(t0); l.stop(end);
+    node.connect(trem); node = trem;
+  }
+  node.connect(master);
+  src.start(t0); src.stop(end);
+}
+
+const SOUNDS = {
+  dog(t) {           // woof woof
+    for (const d of [0, 0.3]) {
+      voice(t + d, { freq: [[0, 380], [0.03, 450], [0.16, 200]],
+        amp: [[0, 0], [0.015, 0.8], [0.08, 0.5], [0.18, 0]],
+        filters: [{ type: 'lowpass', f: [[0, 2000], [0.18, 500]], Q: 5 }] });
+      voice(t + d, { noise: true, amp: [[0, 0], [0.01, 0.4], [0.07, 0]],
+        filters: [{ type: 'bandpass', f: 600, Q: 1 }] });
+    }
+  },
+  cat(t) {           // meeeow
+    voice(t, { freq: [[0, 480], [0.25, 780], [0.55, 720], [0.85, 470]],
+      amp: [[0, 0], [0.06, 0.7], [0.65, 0.6], [0.85, 0]],
+      filters: [{ type: 'bandpass', f: [[0, 900], [0.3, 2200], [0.85, 800]], Q: 2 }],
+      vib: { rate: 6, depth: 10 } });
+  },
+  cow(t) {           // mooooo
+    voice(t, { freq: [[0, 115], [0.3, 150], [1.0, 140], [1.5, 100]],
+      amp: [[0, 0], [0.2, 0.7], [1.2, 0.6], [1.5, 0]],
+      filters: [{ type: 'lowpass', f: [[0, 300], [0.35, 800], [1.5, 350]], Q: 6 }],
+      vib: { rate: 5, depth: 3 } });
+  },
+  pig(t) {           // oink oink
+    for (const d of [0, 0.26]) {
+      voice(t + d, { freq: [[0, 190], [0.18, 150]],
+        amp: [[0, 0], [0.02, 1], [0.14, 0.7], [0.2, 0]],
+        filters: [{ type: 'bandpass', f: [[0, 700], [0.2, 1100]], Q: 3 }],
+        am: { rate: 30, depth: 0.8 } });
+    }
+  },
+  sheep(t) {         // baa-a-a
+    voice(t, { freq: [[0, 320], [0.1, 360], [0.9, 290]],
+      amp: [[0, 0], [0.05, 0.6], [0.75, 0.5], [0.95, 0]],
+      filters: [{ type: 'lowpass', f: 2400, Q: 2 }],
+      vib: { rate: 11, depth: 25 }, am: { rate: 11, depth: 0.6 } });
+  },
+  duck(t) {          // quack quack
+    for (const d of [0, 0.3]) {
+      voice(t + d, { freq: [[0, 280], [0.2, 210]],
+        amp: [[0, 0], [0.02, 1], [0.15, 0.8], [0.22, 0]],
+        filters: [{ type: 'bandpass', f: 1400, Q: 3 }],
+        am: { rate: 45, depth: 0.6 } });
+    }
+  },
+  frog(t) {          // rib-bit
+    for (const [d, len] of [[0, 0.1], [0.17, 0.22]]) {
+      voice(t + d, { wave: 'square', freq: [[0, 190], [len, 140]],
+        amp: [[0, 0], [0.01, 0.5], [len - 0.02, 0.45], [len, 0]],
+        filters: [{ type: 'lowpass', f: 900, Q: 6 }],
+        am: { rate: 38, depth: 1, wave: 'square' } });
+    }
+  },
+  lion(t) {          // rooaarr
+    voice(t, { noise: true, amp: [[0, 0], [0.3, 1], [1.0, 0.7], [1.6, 0]],
+      filters: [{ type: 'lowpass', f: [[0, 350], [0.4, 900], [1.6, 250]], Q: 4 }],
+      am: { rate: 20, depth: 0.6 } });
+    voice(t, { freq: [[0, 90], [0.4, 140], [1.6, 70]],
+      amp: [[0, 0], [0.3, 0.5], [1.0, 0.4], [1.6, 0]],
+      filters: [{ type: 'lowpass', f: 600, Q: 2 }], am: { rate: 20, depth: 0.7 } });
+  },
+  owl(t) {           // hoo hoo
+    for (const d of [0, 0.55]) {
+      voice(t + d, { wave: 'sine', freq: [[0, 370], [0.1, 420], [0.4, 360]],
+        amp: [[0, 0], [0.08, 0.7], [0.3, 0.55], [0.45, 0]], vib: { rate: 5, depth: 4 } });
+    }
+  },
+  chick(t) {         // tweet tweet tweet
+    for (const d of [0, 0.15, 0.3]) {
+      voice(t + d, { wave: 'sine', freq: [[0, 2300], [0.08, 3800]],
+        amp: [[0, 0], [0.01, 0.35], [0.09, 0]] });
+    }
+  },
+  mouse(t) {         // squeak squeak
+    for (const d of [0, 0.14, 0.28]) {
+      voice(t + d, { wave: 'sine', freq: [[0, 3300], [0.04, 3900], [0.07, 3500]],
+        amp: [[0, 0], [0.01, 0.3], [0.08, 0]] });
+    }
+  },
+  elephant(t) {      // trumpet
+    voice(t, { freq: [[0, 450], [0.15, 750], [0.8, 700], [1.1, 520]],
+      amp: [[0, 0], [0.08, 0.8], [0.9, 0.7], [1.1, 0]],
+      filters: [{ type: 'bandpass', f: 1300, Q: 1.5 }], vib: { rate: 7, depth: 18 } });
+    voice(t, { noise: true, amp: [[0, 0], [0.08, 0.25], [1.1, 0]],
+      filters: [{ type: 'bandpass', f: 1500, Q: 2 }] });
+  },
+};
+
+soundBtn.addEventListener('pointerdown', e => {
+  e.stopPropagation();
+  soundOn = !soundOn;
+  soundBtn.textContent = soundOn ? '🔊' : '🔇';
+});
+
+// ---------- Bubbles ----------
+const COLORS = [ [255,120,170], [120,200,255], [140,230,140], [255,210,90], [190,140,255], [255,160,100] ];
+const ANIMALS = [
+  { emoji: '🐶', name: 'dog' },
+  { emoji: '🐱', name: 'cat' },
+  { emoji: '🐮', name: 'cow' },
+  { emoji: '🐷', name: 'pig' },
+  { emoji: '🐑', name: 'sheep' },
+  { emoji: '🦆', name: 'duck' },
+  { emoji: '🐸', name: 'frog' },
+  { emoji: '🦁', name: 'lion' },
+  { emoji: '🦉', name: 'owl' },
+  { emoji: '🐤', name: 'chick' },
+  { emoji: '🐭', name: 'mouse' },
+  { emoji: '🐘', name: 'elephant' },
+];
+const ANIMAL_CHANCE = 0.4;   // share of bubbles that carry an animal
+
+// Optional real recordings: put sounds/<name>.mp3 next to this file (e.g. sounds/cow.mp3)
+// and it is used instead of the synthesized sound for that animal.
+for (const a of ANIMALS) {
+  const clip = new Audio(`sounds/${a.name}.mp3`);
+  clip.preload = 'auto';
+  clip.addEventListener('canplaythrough', () => { a.clip = clip; }, { once: true });
+}
+
+function animalSound(a) {
+  if (!soundOn) return;
+  if (a.clip) {
+    const c = a.clip.cloneNode();
+    c.volume = 0.9;
+    c.play().catch(() => {});
+    return;
+  }
+  ac();
+  SOUNDS[a.name](audio.currentTime + 0.02);
+}
+const MAX_BUBBLES = 12;
+const rand = (a, b) => a + Math.random() * (b - a);
+
+const bubbles = [];
+const particles = [];
+let score = 0;
+
+function makeBubble(fromEdge) {
+  const minSide = Math.min(W, H);
+  const r = rand(minSide * 0.06, minSide * 0.11) + 20;   // big enough for little fingers
+  return {
+    x: rand(r, W - r),
+    y: fromEdge ? H + r : rand(r, H - r),
+    r,
+    vx: rand(-40, 40),
+    vy: fromEdge ? rand(-90, -50) : rand(-40, 40),
+    wobble: rand(0, Math.PI * 2),
+    color: COLORS[Math.floor(Math.random() * COLORS.length)],
+    animal: Math.random() < ANIMAL_CHANCE ? ANIMALS[Math.floor(Math.random() * ANIMALS.length)] : null,
+    scale: fromEdge ? 1 : 0,          // grows in when spawned in place
+  };
+}
+
+for (let i = 0; i < MAX_BUBBLES; i++) bubbles.push(makeBubble(false));
+
+function update(dt) {
+  for (const b of bubbles) {
+    // random gentle drift: nudge velocity a little each frame
+    b.vx += rand(-60, 60) * dt;
+    b.vy += rand(-60, 60) * dt;
+    const speed = Math.hypot(b.vx, b.vy), maxV = 70;
+    if (speed > maxV) { b.vx *= maxV / speed; b.vy *= maxV / speed; }
+
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.wobble += dt * 3;
+    b.scale = Math.min(1, b.scale + dt * 3);
+
+    // bounce softly off the walls (allow entering from the bottom)
+    if (b.x < b.r)     { b.x = b.r;     b.vx = Math.abs(b.vx); }
+    if (b.x > W - b.r) { b.x = W - b.r; b.vx = -Math.abs(b.vx); }
+    if (b.y < b.r)     { b.y = b.r;     b.vy = Math.abs(b.vy); }
+    if (b.y > H - b.r && b.vy > 0) { b.vy = -Math.abs(b.vy); }
+  }
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vy += 300 * dt;
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  while (bubbles.length < MAX_BUBBLES) bubbles.push(makeBubble(true));
+}
+
+function drawBubble(b) {
+  const s = b.scale;
+  const sx = 1 + Math.sin(b.wobble) * 0.04;
+  const sy = 1 - Math.sin(b.wobble) * 0.04;
+  const r = b.r * s;
+  const [cr, cg, cb] = b.color;
+
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.scale(sx, sy);
+
+  // body
+  const g = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.1, 0, 0, r);
+  g.addColorStop(0, `rgba(255,255,255,0.25)`);
+  g.addColorStop(0.7, `rgba(${cr},${cg},${cb},0.35)`);
+  g.addColorStop(1, `rgba(${cr},${cg},${cb},0.85)`);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+
+  // rim
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = `rgba(255,255,255,0.7)`;
+  ctx.stroke();
+
+  // picture inside
+  if (b.animal) {
+    ctx.font = `${r * 1.0}px serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.globalAlpha = 0.95;
+    ctx.fillText(b.animal.emoji, 0, r * 0.05);
+    ctx.globalAlpha = 1;
+  }
+
+  // shine
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.beginPath();
+  ctx.ellipse(-r * 0.4, -r * 0.45, r * 0.22, r * 0.12, -0.7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(-r * 0.12, -r * 0.62, r * 0.06, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  for (const b of bubbles) drawBubble(b);
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+    if (p.emoji) {
+      // freed animal floats up (no gravity) and fades
+      p.vy = -60;
+      ctx.font = `${p.size}px serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(p.emoji, p.x, p.y);
+    } else if (p.star) {
+      ctx.font = `${p.size}px serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('⭐', p.x, p.y);
+    } else {
+      ctx.fillStyle = `rgb(${p.color.join(',')})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function burst(b) {
+  for (let i = 0; i < 18; i++) {
+    const a = rand(0, Math.PI * 2), sp = rand(120, 320);
+    particles.push({
+      x: b.x + Math.cos(a) * b.r * 0.8, y: b.y + Math.sin(a) * b.r * 0.8,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 80,
+      size: rand(3, 8), color: b.color, life: 0.7, maxLife: 0.7,
+    });
+  }
+  for (let i = 0; i < 3; i++) {
+    particles.push({
+      x: b.x, y: b.y, vx: rand(-120, 120), vy: rand(-300, -180),
+      size: rand(22, 34), star: true, life: 1, maxLife: 1,
+    });
+  }
+}
+
+// ---------- Input ----------
+canvas.addEventListener('pointerdown', e => {
+  const x = e.clientX, y = e.clientY;
+  // check top-most bubble first; generous hit area for small hands
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const b = bubbles[i];
+    if (Math.hypot(x - b.x, y - b.y) <= b.r * 1.15) {
+      bubbles.splice(i, 1);
+      burst(b);
+      pop(rand(300, 600) * (60 / b.r + 0.5));
+      if (b.animal) {
+        const a = b.animal;
+        setTimeout(() => animalSound(a), 150);   // let the pop be heard first
+        particles.push({ x: b.x, y: b.y, vx: 0, vy: -60, size: b.r * 1.2,
+                         emoji: a.emoji, life: 1.2, maxLife: 1.2 });
+      }
+      score++;
+      scoreEl.textContent = '⭐ ' + score;
+      break;
+    }
+  }
+});
+
+// ---------- Loop ----------
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

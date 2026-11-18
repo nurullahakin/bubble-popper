@@ -26,12 +26,28 @@
     width: 60px; height: 60px; border: none; border-radius: 50%;
     background: rgba(255,255,255,.8); font-size: 30px; cursor: pointer;
   }
+  /* wand recharge meter: the ring fills up while the wand recharges */
+  #wandMeter {
+    position: fixed; top: 14px; left: 14px;
+    width: 60px; height: 60px; border-radius: 50%;
+    display: grid; place-items: center;
+    font-size: 30px; pointer-events: none;
+    --p: 1;
+    background:
+      radial-gradient(circle, rgba(255,255,255,.9) 0 23px, transparent 24px),
+      conic-gradient(#ff6fa8 calc(var(--p) * 360deg), rgba(255,255,255,.5) 0);
+  }
+  #wandMeter span { transition: opacity .3s, filter .3s; }
+  #wandMeter.charging span { opacity: .35; filter: grayscale(1); }
+  #wandMeter.ready span { animation: wiggle 1.2s ease-in-out infinite; }
+  @keyframes wiggle { 0%,100% { transform: rotate(-12deg) scale(1); } 50% { transform: rotate(12deg) scale(1.15); } }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="score">⭐ 0</div>
 <button id="sound" aria-label="Toggle sound">🔊</button>
+<div id="wandMeter" class="ready" aria-hidden="true"><span>🪄</span></div>
 
 <script>
 const canvas = document.getElementById('c');
@@ -564,14 +580,52 @@ function tryPop(x, y) {
   }
 }
 
+// ---------- Wand cooldown: one use, then it recharges ----------
+// A "use" starts with the first drag after the wand is ready and lasts until all fingers
+// lift (or WAND_MAX_USE seconds pass, so holding a finger down forever doesn't count as one use).
+const WAND_COOLDOWN = 10;       // seconds before the wand works again
+const WAND_MAX_USE = 3;           // seconds a single use can last
+let wandActiveUntil = 0;          // > 0 while a use is in progress
+let wandReadyAt = 0;              // time (s) when the wand is ready again
+const wandMeter = document.getElementById('wandMeter');
+const nowSec = () => performance.now() / 1000;
+
+function endWandUse(at) {
+  if (!wandActiveUntil) return;
+  wandActiveUntil = 0;
+  wandReadyAt = at + WAND_COOLDOWN;
+}
+
+function wandCanSpawn() {
+  const now = nowSec();
+  if (wandActiveUntil) {
+    if (now < wandActiveUntil) return true;
+    endWandUse(wandActiveUntil);   // ran out of time mid-drag
+    return false;
+  }
+  if (now >= wandReadyAt) {        // ready: start a new use
+    wandActiveUntil = now + WAND_MAX_USE;
+    return true;
+  }
+  return false;
+}
+
+function updateWandMeter() {
+  const now = nowSec();
+  if (wandActiveUntil && now >= wandActiveUntil) endWandUse(wandActiveUntil);
+  const charging = !wandActiveUntil && now < wandReadyAt;
+  const p = charging ? 1 - (wandReadyAt - now) / WAND_COOLDOWN : 1;
+  wandMeter.style.setProperty('--p', p.toFixed(3));
+  wandMeter.className = charging ? 'charging' : (wandActiveUntil ? '' : 'ready');
+}
+
 // Track each finger separately so multi-touch wands work too.
 const pointers = new Map();   // pointerId -> {x, y, carry}
 
 canvas.addEventListener('pointerdown', e => {
   canvas.setPointerCapture?.(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, carry: 0 });
-  tryPop(e.clientX, e.clientY);
-  spawnWandBubble(e.clientX, e.clientY);
+  tryPop(e.clientX, e.clientY);   // a plain tap pops but doesn't use up the wand
 });
 
 canvas.addEventListener('pointermove', e => {
@@ -581,7 +635,7 @@ canvas.addEventListener('pointermove', e => {
   const dx = x - p.x, dy = y - p.y, dist = Math.hypot(dx, dy);
   // drop tiny bubbles evenly along the path, however fast the finger moves
   let d = WAND_SPACING - p.carry;
-  while (d <= dist) {
+  while (d <= dist && wandCanSpawn()) {
     spawnWandBubble(p.x + dx * d / dist, p.y + dy * d / dist);
     d += WAND_SPACING;
   }
@@ -590,7 +644,10 @@ canvas.addEventListener('pointermove', e => {
   tryPop(x, y);                                 // swiping through big bubbles pops them too
 });
 
-const endPointer = e => pointers.delete(e.pointerId);
+const endPointer = e => {
+  pointers.delete(e.pointerId);
+  if (pointers.size === 0) endWandUse(nowSec());   // all fingers lifted: start recharging
+};
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
 
@@ -603,6 +660,7 @@ function loop(now) {
   last = now;
   update(dt);
   updateWand(dt);
+  updateWandMeter();
   draw();
   requestAnimationFrame(loop);
 }

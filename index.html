@@ -387,6 +387,7 @@ function drawBubble(b) {
 
 function draw() {
   ctx.clearRect(0, 0, W, H);
+  drawWand();
   for (const b of bubbles) drawBubble(b);
   for (const p of particles) {
     ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
@@ -425,13 +426,128 @@ function burst(b) {
   }
 }
 
+// ---------- Bubble wand: dragging leaves a trail of tiny bubbles ----------
+const wand = [];
+const MAX_WAND = 160;
+const WAND_SPACING = 26;          // px of finger travel per wand bubble
+let lastTinkle = 0;
+
+// soft "bloop" when a wand bubble is blown (throttled so dragging sounds bubbly, not buzzy)
+let lastBlow = 0;
+function blowSound(note) {
+  if (!soundOn) return;
+  const a = ac(), t = a.currentTime;
+  if (t - lastBlow < 0.09) return;
+  lastBlow = t;
+
+  // round, low bubble "bloop": pitch rises like air filling a bubble
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(note * 0.35, t);
+  o.frequency.exponentialRampToValueAtTime(note * 0.7, t + 0.12);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.16, t + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+  o.connect(g).connect(master);
+  o.start(t); o.stop(t + 0.17);
+
+  // tiny breath of air
+  const n = a.createBufferSource(), f = a.createBiquadFilter(), ng = a.createGain();
+  n.buffer = noiseBuf;
+  f.type = 'bandpass'; f.frequency.value = 1200; f.Q.value = 0.8;
+  ng.gain.setValueAtTime(0.05, t);
+  ng.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+  n.connect(f).connect(ng).connect(master);
+  n.start(t, Math.random()); n.stop(t + 0.11);
+}
+
+function spawnWandBubble(x, y) {
+  if (wand.length >= MAX_WAND) wand.shift();
+  const c = COLORS[Math.floor(Math.random() * COLORS.length)];
+  blowSound(c.note);
+  const life = rand(1.8, 3.2);
+  wand.push({
+    x: x + rand(-8, 8), y: y + rand(-8, 8),
+    r: rand(14, 30),
+    vx: rand(-25, 25), vy: rand(-70, -30),
+    wobble: rand(0, Math.PI * 2),
+    color: c.rgb, note: c.note,
+    life, maxLife: life,
+  });
+}
+
+// soft, high "tink" when a tiny bubble pops on its own (throttled so it never gets noisy)
+function tinkle(note) {
+  if (!soundOn || !audio) return;
+  const t = audio.currentTime;
+  if (t - lastTinkle < 0.08) return;
+  lastTinkle = t;
+
+  // bubbly "plip": quick upward pitch sweep
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(note * 0.8, t);
+  o.frequency.exponentialRampToValueAtTime(note * 2, t + 0.05);
+  g.gain.setValueAtTime(0.18, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+  o.connect(g).connect(master);
+  o.start(t); o.stop(t + 0.09);
+
+  // little ringing note in the bubble's color, an octave up
+  const n = audio.createOscillator(), ng = audio.createGain();
+  n.type = 'triangle'; n.frequency.value = note * 2;
+  ng.gain.setValueAtTime(0.0001, t + 0.01);
+  ng.gain.exponentialRampToValueAtTime(0.16, t + 0.02);
+  ng.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+  n.connect(ng).connect(master);
+  n.start(t + 0.01); n.stop(t + 0.42);
+}
+
+function updateWand(dt) {
+  for (let i = wand.length - 1; i >= 0; i--) {
+    const w = wand[i];
+    w.wobble += dt * 4;
+    w.x += (w.vx + Math.sin(w.wobble) * 15) * dt;
+    w.y += w.vy * dt;
+    w.vy -= 10 * dt;             // drift up a little faster over time
+    w.life -= dt;
+    if (w.life <= 0 || w.y < -w.r) {
+      wand.splice(i, 1);
+      if (w.life <= 0) {
+        for (let k = 0; k < 6; k++) {
+          const a = rand(0, Math.PI * 2), sp = rand(60, 140);
+          particles.push({ x: w.x, y: w.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                           size: rand(2.5, 5), color: w.color, life: 0.4, maxLife: 0.4 });
+        }
+        tinkle(w.note);
+      }
+    }
+  }
+}
+
+function drawWand() {
+  for (const w of wand) {
+    const [cr, cg, cb] = w.color;
+    // grow in quickly, then fade over the last half second
+    const age = w.maxLife - w.life;
+    const r = w.r * Math.min(1, age * 6);
+    ctx.globalAlpha = Math.min(1, w.life * 2);
+    ctx.fillStyle = `rgba(${cr},${cg},${cb},0.25)`;
+    ctx.strokeStyle = `rgba(${cr},${cg},${cb},0.9)`;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(w.x, w.y, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.beginPath(); ctx.arc(w.x - r * 0.35, w.y - r * 0.35, r * 0.25, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
 // ---------- Input ----------
-canvas.addEventListener('pointerdown', e => {
-  const x = e.clientX, y = e.clientY;
+function tryPop(x, y) {
   // check top-most bubble first; generous hit area for small hands
   for (let i = bubbles.length - 1; i >= 0; i--) {
     const b = bubbles[i];
-    if (Math.hypot(x - b.x, y - b.y) <= b.r * 1.15) {
+    if (b.scale > 0.5 && Math.hypot(x - b.x, y - b.y) <= b.r * 1.15) {
       bubbles.splice(i, 1);
       burst(b);
       pop(b.note);
@@ -443,10 +559,40 @@ canvas.addEventListener('pointerdown', e => {
       }
       score++;
       scoreEl.textContent = '⭐ ' + score;
-      break;
+      return;
     }
   }
+}
+
+// Track each finger separately so multi-touch wands work too.
+const pointers = new Map();   // pointerId -> {x, y, carry}
+
+canvas.addEventListener('pointerdown', e => {
+  canvas.setPointerCapture?.(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, carry: 0 });
+  tryPop(e.clientX, e.clientY);
+  spawnWandBubble(e.clientX, e.clientY);
 });
+
+canvas.addEventListener('pointermove', e => {
+  const p = pointers.get(e.pointerId);
+  if (!p) return;                               // mouse hovering without a button held
+  const x = e.clientX, y = e.clientY;
+  const dx = x - p.x, dy = y - p.y, dist = Math.hypot(dx, dy);
+  // drop tiny bubbles evenly along the path, however fast the finger moves
+  let d = WAND_SPACING - p.carry;
+  while (d <= dist) {
+    spawnWandBubble(p.x + dx * d / dist, p.y + dy * d / dist);
+    d += WAND_SPACING;
+  }
+  p.carry = (p.carry + dist) % WAND_SPACING;
+  p.x = x; p.y = y;
+  tryPop(x, y);                                 // swiping through big bubbles pops them too
+});
+
+const endPointer = e => pointers.delete(e.pointerId);
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
 
 // ---------- Loop ----------
 let last = performance.now();
@@ -456,6 +602,7 @@ function loop(now) {
   const dt = Math.max(0, Math.min(0.05, (now - last) / 1000));
   last = now;
   update(dt);
+  updateWand(dt);
   draw();
   requestAnimationFrame(loop);
 }
